@@ -1,12 +1,12 @@
 import React from "react";
-import { Upload, FileText, X, Check } from "lucide-react";
+import { Upload, FileText, X, Check, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 interface DocumentUploadProps {
   className?: string;
-  onDocumentsLoaded?: (documents: string[]) => void;
+  onDocumentsLoaded?: (documents: { name: string; content: string }[]) => void;
 }
 
 const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) => {
@@ -59,22 +59,28 @@ const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) =
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
   
-  const uploadFiles = () => {
+  const uploadFiles = async () => {
     if (files.length === 0) return;
     
     setUploadStatus("uploading");
     
-    // Simulate upload delay
-    setTimeout(() => {
-      setUploadStatus("success");
+    try {
+      // Read file contents
+      const fileContents = await Promise.all(
+        files.map(async (file) => {
+          const text = await file.text();
+          return {
+            name: file.name,
+            content: text
+          };
+        })
+      );
+
+      // Store both name and content in parent
+      await Promise.resolve(onDocumentsLoaded?.(fileContents));
       
-      // Add files to loaded documents
-      const newLoadedDocs = [...files.map(f => f.name)];
-      setLoadedDocuments(prev => {
-        const updated = [...prev, ...newLoadedDocs];
-        onDocumentsLoaded?.(updated); // Notify parent
-        return updated;
-      });
+      setUploadStatus("success");
+      setLoadedDocuments(prev => [...prev, ...fileContents.map(f => f.name)]);
       
       // Close dialog after success
       setTimeout(() => {
@@ -85,7 +91,10 @@ const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) =
           setUploadStatus("idle");
         }, 300);
       }, 1000);
-    }, 1500);
+    } catch (error) {
+      console.error('Error uploading files:', error);
+      setUploadStatus("error");
+    }
   };
   
   const getFileIcon = (file: File) => {
@@ -106,35 +115,22 @@ const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) =
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
       <DialogTrigger asChild>
         <Button 
-          variant="outline" 
-          size="sm" 
-          className={cn(
-            "gap-1.5 relative",
-            loadedDocuments.length > 0 && "pl-7",
-            className
-          )}
+          variant="ghost" 
+          size="icon"
+          className="text-muted-foreground h-8 w-8"
+          title="Upload documents"
         >
-          {loadedDocuments.length > 0 && (
-            <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center">
-              <div className="w-2 h-2 rounded-full bg-green-500" />
-            </div>
-          )}
-          <Upload className="h-3.5 w-3.5" />
-          <span>
-            {loadedDocuments.length > 0 
-              ? `${loadedDocuments.length} Document${loadedDocuments.length !== 1 ? 's' : ''} Loaded`
-              : 'Upload Document'
-            }
-          </span>
+          <Upload className="h-4 w-4" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md" aria-describedby="upload-description">
         <DialogHeader>
           <DialogTitle>Upload Research Document</DialogTitle>
         </DialogHeader>
         
         <div className="space-y-4 py-4">
           <div
+            id="upload-description"
             className={cn(
               "border-2 border-dashed rounded-lg p-6 transition-colors text-center",
               isDragging ? "border-primary bg-primary/5" : "border-border",
@@ -169,6 +165,7 @@ const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) =
                   accept=".pdf,.docx,.doc,.txt,.tex"
                   multiple
                   onChange={handleFileInput}
+                  aria-label="File upload input"
                   disabled={uploadStatus === "uploading"}
                 />
                 <Button
@@ -203,6 +200,7 @@ const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) =
                       size="icon"
                       className="h-6 w-6"
                       onClick={() => removeFile(index)}
+                      aria-label={`Remove ${file.name}`}
                       disabled={uploadStatus === "uploading"}
                     >
                       <X className="h-3.5 w-3.5" />

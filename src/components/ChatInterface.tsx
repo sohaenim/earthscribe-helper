@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Send, CornerDownLeft, Bot, Sparkles, RefreshCw } from "lucide-react";
@@ -7,27 +7,19 @@ import ModelSettings from "./ModelSettings";
 import DocumentUpload from "./DocumentUpload";
 import { cn } from "@/lib/utils";
 import { aiService } from "@/lib/ai-service";
+import { useToast } from "@/components/ui/use-toast";
 
 interface ChatInterfaceProps {
   className?: string;
 }
 
-const initialMessages: ChatMessageProps['message'][] = [
-  {
-    id: "1",
-    role: "assistant",
-    content: "Welcome to Earth Science Paper Assistant. I'm here to help you write, edit, and polish your scientific papers with a focus on Earth Science. What would you like to work on today?\n\nI can help with:\n- Drafting new sections\n- Polishing existing text\n- Suggesting citations\n- Checking grammar and style\n- Explaining complex Earth Science concepts\n- Formatting references in APA style",
-    timestamp: new Date(),
-  },
-];
-
 const ChatInterface = ({ className }: ChatInterfaceProps) => {
-  const [messages, setMessages] = useState<ChatMessageProps['message'][]>(initialMessages);
   const [input, setInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [loadedDocuments, setLoadedDocuments] = useState<string[]>([]);
+  const [messages, setMessages] = useState<ChatMessageProps['message'][]>([]);
+  const [loadedDocuments, setLoadedDocuments] = useState<{name: string; content: string}[]>([]);
   const [modelSettings, setModelSettings] = useState<ModelSettingsState>({
-    model: 'default',
+    model: 'claude-3-sonnet-20240229',
     temperature: 0.7,
     maxTokens: 2000,
     role: "assistant",
@@ -39,66 +31,58 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
       strictMode: false,
     }
   });
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  const handleDocumentsLoaded = useCallback((documents: {name: string; content: string}[]) => {
+    setLoadedDocuments(prev => [...prev, ...documents]);
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (input.trim() === "" || isProcessing) return;
+    if (!input.trim()) return;
 
-    // Add user message
-    const userMessage: ChatMessageProps['message'] = {
-      id: Date.now().toString(),
-      role: "user",
-      content: input,
-      timestamp: new Date(),
-    };
-    
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
     setIsProcessing(true);
-
-    // Focus back on textarea after sending
-    setTimeout(() => {
-      textareaRef.current?.focus();
-    }, 0);
-
+    const currentInput = input;
+    setInput('');
+    
     try {
-      // Get response from AI service
-      const contextPrompt = loadedDocuments.length > 0 
-        ? `Context: The user has loaded the following documents: ${loadedDocuments.join(", ")}.\n\nUser request: ${input}`
-        : input;
-
       const response = await aiService.getCompletion({
-        prompt: contextPrompt,
-        settings: modelSettings
+        prompt: currentInput,
+        settings: {
+          selectedModel: modelSettings.model,
+          temperature: modelSettings.temperature,
+          maxTokens: modelSettings.maxTokens,
+          role: modelSettings.role
+        },
+        documents: loadedDocuments.map(doc => ({
+          name: doc.name,
+          content: doc.content
+        }))
       });
 
-      const assistantMessage: ChatMessageProps['message'] = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response.text,
-        timestamp: new Date(),
-      };
+      setMessages(prev => [
+        ...prev,
+        { role: 'user', content: currentInput, timestamp: new Date() },
+        { role: 'assistant', content: response.text, timestamp: new Date() }
+      ]);
       
-      setMessages((prev) => [...prev, assistantMessage]);
+      // Focus back on textarea after sending
+      setTimeout(() => {
+        textareaRef.current?.focus();
+      }, 0);
+
     } catch (error) {
-      console.error('Error getting completion:', error);
-      const errorMessage: ChatMessageProps['message'] = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "I apologize, but I encountered an error processing your request. Please try again.",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      console.error('Error getting AI response:', error);
+      toast({
+        title: "Error",
+        description: error.message || 'Failed to get response',
+        variant: "destructive",
+      });
+      // Restore input on error
+      setInput(currentInput);
     } finally {
       setIsProcessing(false);
     }
@@ -110,6 +94,14 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
       handleSubmit(e);
     }
   };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   return (
     <div className={cn("flex flex-col h-[calc(100vh-12rem)]", className)}>
@@ -126,70 +118,78 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
         </div>
         
         <div className="flex items-center gap-2">
-          <DocumentUpload 
-            className="shrink-0" 
-            onDocumentsLoaded={setLoadedDocuments}
-          />
+          <DocumentUpload onDocumentsLoaded={handleDocumentsLoaded} />
           <ModelSettings onSettingsChange={setModelSettings} />
           <Button 
             variant="ghost" 
-            size="icon" 
+            size="icon"
             className="text-muted-foreground h-8 w-8"
-            title="New Conversation"
+            onClick={() => setMessages([])}
+            title="Clear conversation"
           >
             <RefreshCw className="h-4 w-4" />
           </Button>
         </div>
       </div>
-      
-      <div className="flex-1 overflow-y-auto glass-panel rounded-lg mb-4">
-        <div className="px-4">
-          {messages.map((message) => (
-            <ChatMessage key={message.id} message={message} />
-          ))}
-          
-          {isProcessing && (
-            <div className="py-4 flex items-start gap-4 animate-fade-up">
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-                <Bot className="w-4 h-4 text-primary" />
-              </div>
-              <div className="typing-indicator mt-3">
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
-            </div>
-          )}
-          
-          <div ref={messagesEndRef} />
+
+      {loadedDocuments.length > 0 && (
+        <div className="bg-green-50 dark:bg-green-900/20 border-b border-green-200 dark:border-green-800 px-4 py-2 text-sm text-green-700 dark:text-green-300">
+          <div className="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <line x1="10" y1="9" x2="8" y2="9"></line>
+            </svg>
+            <span>{loadedDocuments.length} document{loadedDocuments.length > 1 ? 's' : ''} loaded: {loadedDocuments.map(d => d.name).join(', ')}</span>
+          </div>
         </div>
+      )}
+      <div className="flex-1 overflow-y-auto p-4">
+        {messages.map((message, index) => (
+          <ChatMessage 
+            key={`${message.role}-${index}`}
+            message={{
+              role: message.role,
+              content: message.content,
+              timestamp: message.timestamp
+            }} 
+          />
+        ))}
+        <div ref={messagesEndRef} />
       </div>
-      
-      <form onSubmit={handleSubmit} className="relative">
-        <Textarea
-          ref={textareaRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask about Earth Science paper writing, editing, citations..."
-          className="resize-none pr-16 glass-panel min-h-[60px]"
-          rows={2}
-        />
-        <div className="absolute right-3 bottom-3 flex gap-2 items-center">
-          <div className="text-xs text-muted-foreground hidden sm:block">
-            <CornerDownLeft className="h-3 w-3 inline mr-1" />
-            to send
+
+      <div className="border-t p-4">
+        <form onSubmit={handleSubmit} className="flex gap-4">
+          <div className="flex-1">
+            <Textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type your message..."
+              className="min-h-[60px]"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }
+              }}
+            />
           </div>
           <Button 
-            size="icon" 
             type="submit" 
-            disabled={input.trim() === "" || isProcessing}
-            className="h-8 w-8"
+            disabled={isProcessing || !input.trim()}
+            className="h-[60px] px-6"
           >
-            <Send className="h-4 w-4" />
+            {isProcessing ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
           </Button>
-        </div>
-      </form>
+        </form>
+      </div>
     </div>
   );
 };

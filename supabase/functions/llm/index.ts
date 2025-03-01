@@ -1,362 +1,447 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { corsHeaders } from '../_shared/cors.ts';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
-
-interface ModelInfo {
-  id: string;
-  provider: 'openai' | 'anthropic';
-  name: string;
-  maxTokens: number;
-  inputPricePerToken: number;
-  outputPricePerToken: number;
-}
 
 interface CompletionRequest {
   prompt: string;
   modelId: string;
   temperature?: number;
   maxTokens?: number;
+  documents?: { name: string; content: string }[];
+  systemMessage?: string;
 }
 
-// OpenAI Client
-class OpenAIClient {
-  private apiKey: string;
-  private baseUrl = 'https://api.openai.com/v1';
+interface ModelInfo {
+  id: string;
+  provider: 'anthropic' | 'openai';
+  name: string;
+}
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-  }
+// Simple Anthropic client
+class AnthropicClient {
+  constructor(private apiKey: string) {}
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, {
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
+  async complete(params: CompletionRequest) {
+    console.log('Anthropic complete called with params:', {
+      modelId: params.modelId,
+      temperature: params.temperature,
+      maxTokens: params.maxTokens,
+      hasDocuments: !!params.documents,
+      documentCount: params.documents?.length || 0
     });
+    
+    if (params.documents?.length > 0) {
+      console.log('Document names:', params.documents.map(doc => doc.name));
+      console.log('First document preview:', 
+        params.documents[0].content.length > 100 
+          ? params.documents[0].content.substring(0, 100) + '...' 
+          : params.documents[0].content
+      );
+    }
+    
+    // Build the messages array with document content if available
+    const messages = [];
+    
+    // System message will be passed as a top-level parameter, not in the messages array
+    const systemMessage = params.systemMessage || "You are an AI assistant helping with Earth Science papers. If I share any documents, I'll use their content to provide more relevant and specific answers.";
+    
+    // Add user message with document content if available
+    if (params.documents?.length > 0) {
+      try {
+        const userContent = [
+          {
+            type: "text",
+            text: "Here are the relevant documents:\n\n"
+          }
+        ];
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.statusText}`);
+        // Add each document's content with length limits to avoid issues
+        params.documents.forEach((doc, index) => {
+          // Limit content length to avoid potential issues
+          const maxContentLength = 10000; // 10KB per document
+          let content = doc.content;
+          if (content.length > maxContentLength) {
+            console.log(`Truncating document ${doc.name} from ${content.length} to ${maxContentLength} characters`);
+            content = content.substring(0, maxContentLength) + "... [content truncated]";
+          }
+          
+          userContent.push({
+            type: "text", 
+            text: `Document ${index + 1}: ${doc.name}\n${content}\n\n`
+          });
+        });
+
+        // Add the actual user query
+        userContent.push({
+          type: "text",
+          text: `\nUser request: ${params.prompt}`
+        });
+
+        messages.push({
+          role: "user",
+          content: userContent
+        });
+      } catch (error) {
+        console.error('Error processing documents:', error);
+        // Fallback to just the prompt if document processing fails
+        messages.push({
+          role: "user",
+          content: [{ type: "text", text: `I was trying to analyze some documents, but had trouble processing them. Here's my question: ${params.prompt}` }]
+        });
+      }
+    } else {
+      // Just add the user's prompt if no documents
+      messages.push({
+        role: "user",
+        content: [{ type: "text", text: params.prompt }]
+      });
     }
 
-    const data = await response.json();
-    return data.data
-      .filter((model: any) => 
-        model.id.startsWith('gpt-') && 
-        !model.id.includes('instruct')
-      )
-      .map((model: any) => ({
-        id: model.id,
-        maxTokens: model.id.includes('gpt-4') ? 8192 : 4096,
-        inputPricePerToken: model.id.includes('gpt-4') ? 0.03 : 0.0015,
-        outputPricePerToken: model.id.includes('gpt-4') ? 0.06 : 0.002,
-      }));
+    // Prepare the request body
+    const requestBody = {
+      model: params.modelId,
+      max_tokens: params.maxTokens || 2000,
+      temperature: params.temperature || 0.7,
+      messages,
+      system: systemMessage
+    };
+    
+    try {
+      console.log('Sending request to Anthropic API with model:', params.modelId);
+      
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage = `Anthropic API error: ${response.status}`;
+        
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorMessage += ` - ${JSON.stringify(errorJson)}`;
+        } catch (e) {
+          errorMessage += ` - ${errorText}`;
+        }
+        
+        console.error(errorMessage);
+        throw new Error(errorMessage);
+      }
+      
+      const data = await response.json();
+      return {
+        content: data.content[0]?.text || 'No response content',
+        usage: {
+          prompt_tokens: data.usage?.input_tokens || 0,
+          completion_tokens: data.usage?.output_tokens || 0,
+          total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
+        }
+      };
+    } catch (error) {
+      console.error('Error calling Anthropic API:', error);
+      throw error;
+    }
   }
 
-  async complete(params: any) {
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+  async listModels(): Promise<ModelInfo[]> {
+    try {
+      console.log('Fetching Anthropic models...');
+      const response = await fetch('https://api.anthropic.com/v1/models', {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+      });
+
+      console.log('Anthropic API response status:', response.status);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage = `Anthropic API error: ${response.status}`;
+        
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorMessage += ` - ${JSON.stringify(errorJson)}`;
+        } catch (e) {
+          errorMessage += ` - ${errorText}`;
+        }
+        
+        console.error(errorMessage);
+        throw new Error(errorMessage);
+      }
+
+      // Only read the response body once
+      const responseText = await response.text();
+      console.log('Anthropic API response body:', responseText);
+
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Failed to parse Anthropic response: ${e.message}`);
+      }
+
+      console.log('Parsed Anthropic data:', data);
+
+      // The Anthropic API returns { data: [ models ] }
+      if (!data) {
+        throw new Error('Invalid response format from Anthropic API: empty response');
+      }
+
+      // Handle the actual response format which is { data: [ models ] }
+      const modelList = data.data || [];
+      
+      if (!Array.isArray(modelList)) {
+        console.error('Unexpected model list format:', modelList);
+        throw new Error('Invalid model list format from Anthropic API');
+      }
+      
+      return modelList
+        .filter((model: any) => model && model.id && model.id.startsWith('claude'))
+        .map((model: any) => ({
+          id: model.id,
+          name: model.name || model.id,
+          provider: 'anthropic'
+        }));
+    } catch (error) {
+      console.error('Error fetching Anthropic models:', error);
+      throw error; // Let the caller handle the error
+    }
+  }
+}
+
+// Simple OpenAI client
+class OpenAIClient {
+  constructor(private apiKey: string) {}
+
+  async complete(params: CompletionRequest) {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        model: params.modelId,
+        max_tokens: params.maxTokens || 2000,
+        temperature: params.temperature || 0.7,
+        messages: [
+          {
+            role: "system",
+            content: "You are an AI assistant helping with Earth Science papers. If I mention any loaded documents in the context, use that information to provide more relevant and specific answers."
+          },
+          {
+            role: "user",
+            content: params.prompt
+          }
+        ]
+      })
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.statusText}`);
+      const error = await response.text();
+      throw new Error(`OpenAI API error: ${response.status} - ${error}`);
     }
 
     const data = await response.json();
     return {
       content: data.choices[0].message.content,
-      usage: data.usage,
+      usage: {
+        prompt_tokens: data.usage.prompt_tokens,
+        completion_tokens: data.usage.completion_tokens,
+        total_tokens: data.usage.total_tokens
+      }
     };
-  }
-}
-
-// Anthropic Client
-class AnthropicClient {
-  private apiKey: string;
-  private baseUrl = 'https://api.anthropic.com/v1';
-
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
   }
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
+      const response = await fetch('https://api.openai.com/v1/models', {
         method: 'GET',
         headers: {
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01'
-        }
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch Anthropic models: ${response.statusText}`);
+        throw new Error(`Failed to fetch OpenAI models: ${response.status}`);
       }
 
       const data = await response.json();
-      console.log('Anthropic models response:', data);
-
-      // Handle the actual response format where models are in data.data
-      const models = data?.data || [];
-
-      return models
-        .filter((model: any) => model.type === 'model')
-        .map((model: any) => {
-          const id = model.id || '';
-          const name = model.display_name || id.split('-').map(word => 
-            word.charAt(0).toUpperCase() + word.slice(1)
-          ).join(' ');
-
-          // Get pricing based on model ID
-          const pricing = {
-            'claude-3-opus-20240229': { input: 0.00015, output: 0.00075 },
-            'claude-3-sonnet-20240229': { input: 0.00003, output: 0.00015 },
-            'claude-3-haiku-20240307': { input: 0.00025, output: 0.00125 }
-          }[id] || { input: 0.0001, output: 0.0005 };
-
-          return {
-            id,
-            name,
-            provider: 'anthropic',
-            maxTokens: 200000, // Current max for Claude 3
-            inputPricePerToken: pricing.input,
-            outputPricePerToken: pricing.output
-          };
-        })
-        .filter(model => model.id && model.id.startsWith('claude-3')); // Only return Claude 3 models
+      return data.data
+        .filter((model: any) => model.id.startsWith('gpt'))
+        .map((model: any) => ({
+          id: model.id,
+          name: model.id,
+          provider: 'openai'
+        }));
     } catch (error) {
-      console.error('Error fetching Anthropic models:', error);
-      return []; // Return empty array if fetch fails
+      console.error('Error fetching OpenAI models:', error);
+      return [];
     }
-  }
-
-  async complete(params: any) {
-    const response = await fetch(`${this.baseUrl}/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: params.model,
-        messages: [{ role: 'user', content: params.prompt }],
-        temperature: params.temperature,
-        max_tokens: params.maxTokens,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Anthropic API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return {
-      content: data.content[0].text,
-      usage: {
-        prompt_tokens: data.usage.input_tokens,
-        completion_tokens: data.usage.output_tokens,
-        total_tokens: data.usage.input_tokens + data.usage.output_tokens,
-      },
-    };
   }
 }
 
-// Initialize clients
-const openaiClient = new OpenAIClient(Deno.env.get('OPENAI_API_KEY') || '');
-const anthropicClient = new AnthropicClient(Deno.env.get('ANTHROPIC_API_KEY') || '');
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
 
-serve(async (req) => {
-  // Handle CORS
+serve(async (req: Request) => {
+  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { 
-      headers: {
-        ...corsHeaders,
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      } 
-    });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    const url = new URL(req.url);
-    const path = url.pathname.split('/').pop();
-
-    console.log(`Processing request for path: ${path}`);
+    const body = await req.text();
+    console.log('Request body length:', body.length);
+    console.log('Request body preview:', body.substring(0, 200) + (body.length > 200 ? '...' : ''));
     
-    // Log headers for debugging
-    console.log('Request headers:', Object.fromEntries(req.headers.entries()));
-
-    // Get the JWT token from the Authorization header
-    const authHeader = req.headers.get('Authorization');
-    if (!authHeader) {
-      console.error('No Authorization header found');
+    let params;
+    try {
+      params = JSON.parse(body);
+    } catch (e) {
+      console.error('JSON parse error:', e);
+      // Try to identify where the JSON parsing failed
+      let errorPosition = '';
+      if (e instanceof SyntaxError && e.message.includes('position')) {
+        const posMatch = e.message.match(/position (\d+)/);
+        if (posMatch && posMatch[1]) {
+          const pos = parseInt(posMatch[1]);
+          const start = Math.max(0, pos - 20);
+          const end = Math.min(body.length, pos + 20);
+          errorPosition = `Error near: "${body.substring(start, end)}"`;
+        }
+      }
+      
       return new Response(
-        JSON.stringify({ error: 'Unauthorized', details: 'No Authorization header found' }),
+        JSON.stringify({ 
+          error: 'Invalid JSON in request body', 
+          details: e.message,
+          errorPosition: errorPosition
+        }),
         { 
-          status: 401, 
-          headers: { 
-            ...corsHeaders,
-            'Content-Type': 'application/json' 
-          } 
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       );
     }
 
-    // Create Supabase client
-    const supabaseClient = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      {
-        global: {
-          headers: { Authorization: authHeader },
-        },
-      }
-    );
+    const { action } = params;
+    console.log('Action:', action);
 
-    // Verify authentication
-    try {
-      const { data: { user }, error } = await supabaseClient.auth.getUser(authHeader.replace('Bearer ', ''));
-      
-      if (error || !user) {
-        console.error('Authentication error:', error);
+    if (!action) {
+      return new Response(
+        JSON.stringify({ error: 'Missing action parameter' }),
+        { 
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        }
+      );
+    }
+
+    // Initialize API clients
+    const anthropicClient = new AnthropicClient(Deno.env.get('ANTHROPIC_API_KEY') || '');
+    const openaiClient = new OpenAIClient(Deno.env.get('OPENAI_API_KEY') || '');
+
+    // Handle action
+    switch (action) {
+      case 'complete': {
+        const { prompt, modelId, temperature, maxTokens, documents, systemMessage } = params;
+
+        if (!prompt || !modelId) {
+          return new Response(
+            JSON.stringify({ error: 'Missing required parameters' }),
+            { 
+              status: 400,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            }
+          );
+        }
+
+        // Determine provider based on model ID prefix
+        const provider = modelId.startsWith('claude') ? 'anthropic' : 'openai';
+        console.log('Selected provider:', provider);
+        
+        const client = provider === 'anthropic' ? anthropicClient : openaiClient;
+        const result = await client.complete({ prompt, modelId, temperature, maxTokens, documents, systemMessage });
+
         return new Response(
-          JSON.stringify({ error: 'Unauthorized', details: error?.message || 'Invalid token' }),
-          { 
-            status: 401, 
-            headers: { 
-              ...corsHeaders,
-              'Content-Type': 'application/json' 
-            } 
-          }
+          JSON.stringify(result),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }}
         );
       }
-      
-      console.log(`Authenticated user: ${user.id}`);
-    } catch (authError) {
-      console.error('Exception during authentication:', authError);
-      return new Response(
-        JSON.stringify({ error: 'Authentication Error', details: authError.message }),
-        { 
-          status: 401, 
-          headers: { 
-            ...corsHeaders,
-            'Content-Type': 'application/json' 
-          } 
-        }
-      );
-    }
 
-    switch (path) {
-      case 'models':
-        return await handleGetModels(req);
-      case 'completion':
-        return await handleCompletion(req);
+      case 'models': {
+        console.log('Fetching models...');
+        try {
+          let anthropicModels = [];
+          let openaiModels = [];
+          
+          try {
+            anthropicModels = await anthropicClient.listModels();
+            console.log('Successfully fetched Anthropic models:', anthropicModels);
+          } catch (error) {
+            console.error('Error fetching Anthropic models:', error);
+            // Don't rethrow, just continue with empty array
+          }
+          
+          try {
+            openaiModels = await openaiClient.listModels();
+            console.log('Successfully fetched OpenAI models:', openaiModels);
+          } catch (error) {
+            console.error('Error fetching OpenAI models:', error);
+            // Don't rethrow, just continue with empty array
+          }
+          
+          const models = [...anthropicModels, ...openaiModels];
+          
+          if (models.length === 0) {
+            console.warn('No models were fetched from any provider');
+          }
+          
+          console.log('Returning models:', models);
+          
+          return new Response(
+            JSON.stringify(models),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' }}
+          );
+        } catch (error) {
+          console.error('Error fetching models:', error);
+          return new Response(
+            JSON.stringify({ error: 'Failed to fetch models', details: error.message }),
+            { 
+              status: 500,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            }
+          );
+        }
+      }
+
       default:
-        throw new Error('Not Found');
+        return new Response(
+          JSON.stringify({ error: 'Invalid action' }),
+          { 
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
     }
   } catch (error) {
-    console.error('Error processing request:', error);
+    console.error('Error:', error);
     return new Response(
-      JSON.stringify({
-        error: error.message,
-      }),
-      {
-        status: error.message === 'Unauthorized' ? 401 : 400,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json',
-        },
+      JSON.stringify({ error: error.message }),
+      { 
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       }
     );
   }
 });
-
-async function handleGetModels(req: Request): Promise<Response> {
-  const models: ModelInfo[] = [];
-
-  // Fetch OpenAI models
-  try {
-    const openaiModels = await openaiClient.listModels();
-    models.push(
-      ...openaiModels.map((model) => ({
-        id: model.id,
-        provider: 'openai' as const,
-        name: model.id,
-        maxTokens: model.maxTokens,
-        inputPricePerToken: model.inputPricePerToken,
-        outputPricePerToken: model.outputPricePerToken,
-      }))
-    );
-  } catch (error) {
-    console.error('Error fetching OpenAI models:', error);
-  }
-
-  // Fetch Anthropic models
-  try {
-    const anthropicModels = await anthropicClient.listModels();
-    models.push(
-      ...anthropicModels.map((model) => ({
-        id: model.id,
-        provider: 'anthropic' as const,
-        name: model.name,
-        maxTokens: model.maxTokens,
-        inputPricePerToken: model.inputPricePerToken,
-        outputPricePerToken: model.outputPricePerToken,
-      }))
-    );
-  } catch (error) {
-    console.error('Error fetching Anthropic models:', error);
-  }
-
-  return new Response(
-    JSON.stringify({ models }),
-    {
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-}
-
-async function handleCompletion(req: Request): Promise<Response> {
-  const { prompt, modelId, temperature = 0.7, maxTokens = 2000 }: CompletionRequest = await req.json();
-
-  if (!prompt || !modelId) {
-    throw new Error('Missing required fields');
-  }
-
-  let response;
-  if (modelId.startsWith('claude')) {
-    // Add system prompt for document context
-    const systemPrompt = `\n\nHuman: You are an AI assistant helping with Earth Science papers. If I mention any loaded documents in the context, use that information to provide more relevant and specific answers. Here's my request:\n\n${prompt}\n\nAssistant: `;
-    
-    response = await anthropicClient.complete({
-      prompt: systemPrompt,
-      model: modelId,
-      temperature,
-      maxTokens,
-    });
-  } else {
-    response = await openaiClient.complete({
-      messages: [{ role: 'user', content: prompt }],
-      model: modelId,
-      temperature,
-      max_tokens: maxTokens,
-    });
-  }
-
-  return new Response(
-    JSON.stringify(response),
-    {
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-}

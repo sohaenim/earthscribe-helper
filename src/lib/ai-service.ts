@@ -1,100 +1,124 @@
-import type { ModelSettingsState } from '@/components/ModelSettings';
 import { supabase } from '@/integrations/supabase/client';
 
 export interface ModelInfo {
   id: string;
-  provider: 'openai' | 'anthropic';
+  provider: 'anthropic' | 'openai';
   name: string;
+}
+
+export interface ModelSettings {
+  selectedModel: string;
+  temperature: number;
   maxTokens: number;
-  inputPricePerToken: number;
-  outputPricePerToken: number;
+  role: string;
 }
 
 export interface CompletionRequest {
   prompt: string;
-  settings: ModelSettingsState;
+  settings: ModelSettings;
+  documents?: { name: string; content: string }[];
 }
 
 export interface CompletionResponse {
   text: string;
-  usage: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
 }
 
-class AIService {
-  private models: ModelInfo[] = [];
+export class AIService {
+  private supabaseClient = supabase;
 
   async getAvailableModels(): Promise<ModelInfo[]> {
     try {
-      // Get the current session
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      
-      if (sessionError || !session) {
-        console.error('Session error:', sessionError || 'No active session');
-        throw new Error('Authentication required');
-      }
-      
-      // Call the Edge Function with the session token
-      const { data, error } = await supabase.functions.invoke('llm/models', {
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
+      console.log('Fetching available models...');
+      const response = await this.supabaseClient.functions.invoke('llm', {
+        body: {
+          action: 'models'
         }
       });
-      
-      if (error) {
-        console.error('Function invoke error:', error);
-        throw error;
+
+      if (response.error) {
+        console.error('Error response from edge function:', response.error);
+        throw new Error(response.error.message || 'Failed to fetch models');
       }
-      
-      this.models = data.models;
-      return this.models;
+
+      const models = response.data;
+      if (!Array.isArray(models)) {
+        console.error('Invalid response format:', models);
+        throw new Error('Invalid response format from server');
+      }
+
+      if (models.length === 0) {
+        console.warn('No models returned from server');
+      }
+
+      return models;
     } catch (error) {
       console.error('Error fetching models:', error);
-      throw error;
+      throw new Error(error instanceof Error ? error.message : 'Failed to fetch available models');
     }
   }
 
-  async getCompletion(request: CompletionRequest): Promise<CompletionResponse> {
-    const { prompt, settings } = request;
-    
+  async getCompletion({ prompt, settings, documents }: { 
+    prompt: string; 
+    settings: ModelSettings;
+    documents?: { name: string; content: string }[];
+  }): Promise<{ text: string }> {
     try {
-      // Get the current session
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      // Ensure modelId is set - use a default if undefined
+      const modelId = settings.selectedModel || 'claude-3-sonnet-20240229';
       
-      if (sessionError || !session) {
-        console.error('Session error:', sessionError || 'No active session');
-        throw new Error('Authentication required');
+      console.log('Sending completion request with:', {
+        modelId,
+        temperature: settings.temperature,
+        maxTokens: settings.maxTokens,
+        hasDocuments: !!documents,
+        documentCount: documents?.length || 0
+      });
+      
+      // Prepare the request body
+      const requestBody = {
+        action: 'complete',
+        prompt,
+        modelId,
+        temperature: settings.temperature,
+        maxTokens: settings.maxTokens
+      };
+      
+      // Only add documents if they exist to avoid potential issues
+      if (documents && documents.length > 0) {
+        Object.assign(requestBody, { documents });
       }
       
-      const { data, error } = await supabase.functions.invoke('llm/completion', {
-        body: {
-          prompt,
-          modelId: settings.role === 'fact-checker' ? 'claude-3-sonnet' : settings.model,
-          temperature: settings.temperature,
-          maxTokens: settings.maxTokens
-        },
-        headers: { 
+      console.log('Request body:', JSON.stringify(requestBody).substring(0, 200) + '...');
+      
+      // Get the Supabase URL and key from the client
+      const supabaseUrl = this.supabaseClient.functions.url;
+      const supabaseKey = this.supabaseClient.supabaseKey;
+      
+      // Use direct fetch instead of the Supabase client
+      const response = await fetch(`${supabaseUrl}/llm`, {
+        method: 'POST',
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        }
+          'Authorization': `Bearer ${supabaseKey}`
+        },
+        body: JSON.stringify(requestBody)
       });
-
-      if (error) {
-        console.error('Completion function invoke error:', error);
-        throw error;
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Error response from edge function:', errorText);
+        throw new Error(`Failed to get completion: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      if (!data || !data.content) {
+        console.error('Invalid response format:', data);
+        throw new Error('Invalid response format from server');
       }
 
       return {
-        text: data.content,
-        usage: {
-          promptTokens: data.usage.prompt_tokens,
-          completionTokens: data.usage.completion_tokens,
-          totalTokens: data.usage.total_tokens
-        }
+        text: data.content
       };
     } catch (error) {
       console.error('Error calling AI API:', error);
