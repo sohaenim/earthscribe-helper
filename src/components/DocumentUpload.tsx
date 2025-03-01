@@ -1,4 +1,3 @@
-
 import React from "react";
 import { Upload, FileText, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,13 +6,15 @@ import { cn } from "@/lib/utils";
 
 interface DocumentUploadProps {
   className?: string;
+  onDocumentsLoaded?: (documents: string[]) => void;
 }
 
-const DocumentUpload = ({ className }: DocumentUploadProps) => {
+const DocumentUpload = ({ className, onDocumentsLoaded }: DocumentUploadProps) => {
   const [isOpen, setIsOpen] = React.useState(false);
   const [isDragging, setIsDragging] = React.useState(false);
   const [files, setFiles] = React.useState<File[]>([]);
   const [uploadStatus, setUploadStatus] = React.useState<"idle" | "uploading" | "success" | "error">("idle");
+  const [loadedDocuments, setLoadedDocuments] = React.useState<string[]>([]);
   
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -67,10 +68,18 @@ const DocumentUpload = ({ className }: DocumentUploadProps) => {
     setTimeout(() => {
       setUploadStatus("success");
       
+      // Add files to loaded documents
+      const newLoadedDocs = [...files.map(f => f.name)];
+      setLoadedDocuments(prev => {
+        const updated = [...prev, ...newLoadedDocs];
+        onDocumentsLoaded?.(updated); // Notify parent
+        return updated;
+      });
+      
       // Close dialog after success
       setTimeout(() => {
         setIsOpen(false);
-        // Reset after closing
+        // Reset upload state but keep loaded documents
         setTimeout(() => {
           setFiles([]);
           setUploadStatus("idle");
@@ -99,10 +108,24 @@ const DocumentUpload = ({ className }: DocumentUploadProps) => {
         <Button 
           variant="outline" 
           size="sm" 
-          className={cn("gap-1.5", className)}
+          className={cn(
+            "gap-1.5 relative",
+            loadedDocuments.length > 0 && "pl-7",
+            className
+          )}
         >
+          {loadedDocuments.length > 0 && (
+            <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-2 h-2 rounded-full bg-green-500" />
+            </div>
+          )}
           <Upload className="h-3.5 w-3.5" />
-          <span>Upload Document</span>
+          <span>
+            {loadedDocuments.length > 0 
+              ? `${loadedDocuments.length} Document${loadedDocuments.length !== 1 ? 's' : ''} Loaded`
+              : 'Upload Document'
+            }
+          </span>
         </Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
@@ -187,6 +210,11 @@ const DocumentUpload = ({ className }: DocumentUploadProps) => {
                   </div>
                 ))}
               </div>
+              {loadedDocuments.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  Previously loaded: {loadedDocuments.join(", ")}
+                </div>
+              )}
             </div>
           )}
         </div>

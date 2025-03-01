@@ -83,30 +83,55 @@ class AnthropicClient {
     this.apiKey = apiKey;
   }
 
-  async listModels() {
-    return [
-      {
-        id: 'claude-3-opus',
-        name: 'Claude 3 Opus',
-        maxTokens: 200000,
-        inputPricePerToken: 0.015,
-        outputPricePerToken: 0.075,
-      },
-      {
-        id: 'claude-3-sonnet',
-        name: 'Claude 3 Sonnet',
-        maxTokens: 200000,
-        inputPricePerToken: 0.003,
-        outputPricePerToken: 0.015,
-      },
-      {
-        id: 'claude-3-haiku',
-        name: 'Claude 3 Haiku',
-        maxTokens: 200000,
-        inputPricePerToken: 0.00025,
-        outputPricePerToken: 0.00125,
-      },
-    ];
+  async listModels(): Promise<ModelInfo[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch Anthropic models: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('Anthropic models response:', data);
+
+      // Handle the actual response format where models are in data.data
+      const models = data?.data || [];
+
+      return models
+        .filter((model: any) => model.type === 'model')
+        .map((model: any) => {
+          const id = model.id || '';
+          const name = model.display_name || id.split('-').map(word => 
+            word.charAt(0).toUpperCase() + word.slice(1)
+          ).join(' ');
+
+          // Get pricing based on model ID
+          const pricing = {
+            'claude-3-opus-20240229': { input: 0.00015, output: 0.00075 },
+            'claude-3-sonnet-20240229': { input: 0.00003, output: 0.00015 },
+            'claude-3-haiku-20240307': { input: 0.00025, output: 0.00125 }
+          }[id] || { input: 0.0001, output: 0.0005 };
+
+          return {
+            id,
+            name,
+            provider: 'anthropic',
+            maxTokens: 200000, // Current max for Claude 3
+            inputPricePerToken: pricing.input,
+            outputPricePerToken: pricing.output
+          };
+        })
+        .filter(model => model.id && model.id.startsWith('claude-3')); // Only return Claude 3 models
+    } catch (error) {
+      console.error('Error fetching Anthropic models:', error);
+      return []; // Return empty array if fetch fails
+    }
   }
 
   async complete(params: any) {
@@ -115,7 +140,7 @@ class AnthropicClient {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
+        'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
         model: params.model,
@@ -307,8 +332,11 @@ async function handleCompletion(req: Request): Promise<Response> {
 
   let response;
   if (modelId.startsWith('claude')) {
+    // Add system prompt for document context
+    const systemPrompt = `\n\nHuman: You are an AI assistant helping with Earth Science papers. If I mention any loaded documents in the context, use that information to provide more relevant and specific answers. Here's my request:\n\n${prompt}\n\nAssistant: `;
+    
     response = await anthropicClient.complete({
-      prompt,
+      prompt: systemPrompt,
       model: modelId,
       temperature,
       maxTokens,

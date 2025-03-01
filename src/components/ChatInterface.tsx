@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,6 +6,7 @@ import ChatMessage, { ChatMessageProps } from "./ChatMessage";
 import ModelSettings from "./ModelSettings";
 import DocumentUpload from "./DocumentUpload";
 import { cn } from "@/lib/utils";
+import { aiService } from "@/lib/ai-service";
 
 interface ChatInterfaceProps {
   className?: string;
@@ -25,6 +25,20 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<ChatMessageProps['message'][]>(initialMessages);
   const [input, setInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [loadedDocuments, setLoadedDocuments] = useState<string[]>([]);
+  const [modelSettings, setModelSettings] = useState<ModelSettingsState>({
+    model: 'default',
+    temperature: 0.7,
+    maxTokens: 2000,
+    role: "assistant",
+    preset: "default",
+    factChecking: {
+      enabled: true,
+      autoVerify: true,
+      minConfidence: 0.7,
+      strictMode: false,
+    }
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -36,7 +50,7 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
     scrollToBottom();
   }, [messages]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (input.trim() === "" || isProcessing) return;
 
@@ -57,36 +71,36 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
       textareaRef.current?.focus();
     }, 0);
 
-    // Simulate AI response after a delay
-    setTimeout(() => {
-      // This would be replaced with an actual API call to your backend
+    try {
+      // Get response from AI service
+      const contextPrompt = loadedDocuments.length > 0 
+        ? `Context: The user has loaded the following documents: ${loadedDocuments.join(", ")}.\n\nUser request: ${input}`
+        : input;
+
+      const response = await aiService.getCompletion({
+        prompt: contextPrompt,
+        settings: modelSettings
+      });
+
       const assistantMessage: ChatMessageProps['message'] = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: getSimulatedResponse(input),
+        content: response.text,
         timestamp: new Date(),
       };
       
       setMessages((prev) => [...prev, assistantMessage]);
+    } catch (error) {
+      console.error('Error getting completion:', error);
+      const errorMessage: ChatMessageProps['message'] = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: "I apologize, but I encountered an error processing your request. Please try again.",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
       setIsProcessing(false);
-    }, 2000);
-  };
-
-  const getSimulatedResponse = (userInput: string): string => {
-    const lowerInput = userInput.toLowerCase();
-    
-    if (lowerInput.includes("introduction") || lowerInput.includes("start")) {
-      return "For an Earth Science paper introduction, you should:\n\n1. Begin with a broad statement about the research area\n2. Narrow down to the specific problem or question\n3. Explain why this research is important and relevant\n4. Briefly mention existing literature\n5. Clearly state your research objectives\n6. Outline your approach\n7. Provide a roadmap for the rest of the paper\n\nWould you like me to help draft an introduction for a specific topic?";
-    } else if (lowerInput.includes("climate") || lowerInput.includes("change")) {
-      return "Climate change is a significant focus in Earth Science research. When writing about climate change, consider:\n\n- Using precise terminology (e.g., \"global warming\" vs \"climate change\")\n- Citing the latest IPCC reports for authoritative information\n- Distinguishing between observed data and projections\n- Addressing uncertainty appropriately\n- Connecting climate processes to your specific research area\n\nWhich aspect of climate science are you focusing on in your paper?";
-    } else if (lowerInput.includes("citation") || lowerInput.includes("reference")) {
-      return "For APA style citations in Earth Science papers:\n\n**In-text citation:**\nRecent glacial retreats have accelerated due to rising temperatures (Thompson et al., 2021).\n\n**Reference list entry:**\nThompson, J. K., Ramirez, A. L., & Chen, H. (2021). Accelerated glacial retreat in the Greater Himalayan region. *Journal of Climate Change*, 15(3), 245-267. https://doi.org/10.1234/jcc.2021.15.3.245\n\nWould you like me to format a specific citation for you?";
-    } else if (lowerInput.includes("method") || lowerInput.includes("methodology")) {
-      return "A strong methodology section in Earth Science should:\n\n1. Describe the study area/sample collection in detail\n2. Explain equipment specifications and measurement procedures\n3. Detail laboratory techniques or computational methods\n4. Address limitations and assumptions\n5. Include quality control measures\n6. Provide enough detail for replication\n\nWhich specific methodological approach are you using in your research?";
-    } else if (lowerInput.includes("conclusion")) {
-      return "For an effective conclusion in your Earth Science paper:\n\n1. Summarize your key findings without simply repeating results\n2. Interpret results in the context of existing literature\n3. Acknowledge limitations of your study\n4. Suggest implications for theory or practice\n5. Recommend directions for future research\n\nAvoid introducing completely new information in the conclusion. Would you like help drafting a conclusion for your specific research?";
-    } else {
-      return "Thank you for your query. As your Earth Science Paper Assistant, I'd be happy to help you with this topic. To provide the most accurate and helpful guidance:\n\n1. Could you share more specific details about your research question or the section you're working on?\n\n2. What geological, atmospheric, oceanographic, or other Earth Science subdiscipline does your paper focus on?\n\n3. Are you looking for help with content development, citation formatting, or language refinement?\n\nThe more context you provide, the better I can tailor my assistance to your specific needs.";
     }
   };
 
@@ -112,8 +126,11 @@ const ChatInterface = ({ className }: ChatInterfaceProps) => {
         </div>
         
         <div className="flex items-center gap-2">
-          <DocumentUpload />
-          <ModelSettings />
+          <DocumentUpload 
+            className="shrink-0" 
+            onDocumentsLoaded={setLoadedDocuments}
+          />
+          <ModelSettings onSettingsChange={setModelSettings} />
           <Button 
             variant="ghost" 
             size="icon" 

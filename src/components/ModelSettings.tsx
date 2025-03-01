@@ -50,10 +50,13 @@ const ModelSettings = ({ className, onSettingsChange }: ModelSettingsProps) => {
   useEffect(() => {
     async function loadModels() {
       try {
+        console.log('Fetching models...');
         const availableModels = await aiService.getAvailableModels();
+        console.log('Received models:', availableModels);
         setModels(availableModels);
         setLoading(false);
       } catch (err) {
+        console.error('Error loading models:', err);
         setError('Failed to load available models');
         setLoading(false);
       }
@@ -97,7 +100,14 @@ const ModelSettings = ({ className, onSettingsChange }: ModelSettingsProps) => {
           <ChevronDown className="h-3.5 w-3.5" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-80">
+      <PopoverContent 
+        className="w-80" 
+        align="end" 
+        side="bottom" 
+        sideOffset={5}
+        collisionPadding={20}
+        avoidCollisions={false}
+      >
         <div className="space-y-4">
           <h3 className="font-medium text-sm">Model Configuration</h3>
           
