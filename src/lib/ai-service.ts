@@ -1,10 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
 import type { ModelSettingsState } from '@/components/ModelSettings';
-
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL || '',
-  import.meta.env.VITE_SUPABASE_ANON_KEY || ''
-);
+import { supabase } from '@/integrations/supabase/client';
 
 export interface ModelInfo {
   id: string;
@@ -34,8 +29,27 @@ class AIService {
 
   async getAvailableModels(): Promise<ModelInfo[]> {
     try {
-      const { data, error } = await supabase.functions.invoke('llm/models');
-      if (error) throw error;
+      // Get the current session
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError || !session) {
+        console.error('Session error:', sessionError || 'No active session');
+        throw new Error('Authentication required');
+      }
+      
+      // Call the Edge Function with the session token
+      const { data, error } = await supabase.functions.invoke('llm/models', {
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        }
+      });
+      
+      if (error) {
+        console.error('Function invoke error:', error);
+        throw error;
+      }
+      
       this.models = data.models;
       return this.models;
     } catch (error) {
@@ -48,16 +62,31 @@ class AIService {
     const { prompt, settings } = request;
     
     try {
+      // Get the current session
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError || !session) {
+        console.error('Session error:', sessionError || 'No active session');
+        throw new Error('Authentication required');
+      }
+      
       const { data, error } = await supabase.functions.invoke('llm/completion', {
         body: {
           prompt,
           modelId: settings.role === 'fact-checker' ? 'claude-3-sonnet' : settings.model,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens
+        },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
         }
       });
 
-      if (error) throw error;
+      if (error) {
+        console.error('Completion function invoke error:', error);
+        throw error;
+      }
 
       return {
         text: data.content,

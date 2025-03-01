@@ -1,4 +1,4 @@
-import { serve } from 'https://deno.fresh.runtime.dev';
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { corsHeaders } from '../_shared/cors.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
 
@@ -18,6 +18,129 @@ interface CompletionRequest {
   maxTokens?: number;
 }
 
+// OpenAI Client
+class OpenAIClient {
+  private apiKey: string;
+  private baseUrl = 'https://api.openai.com/v1';
+
+  constructor(apiKey: string) {
+    this.apiKey = apiKey;
+  }
+
+  async listModels() {
+    const response = await fetch(`${this.baseUrl}/models`, {
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI API error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.data
+      .filter((model: any) => 
+        model.id.startsWith('gpt-') && 
+        !model.id.includes('instruct')
+      )
+      .map((model: any) => ({
+        id: model.id,
+        maxTokens: model.id.includes('gpt-4') ? 8192 : 4096,
+        inputPricePerToken: model.id.includes('gpt-4') ? 0.03 : 0.0015,
+        outputPricePerToken: model.id.includes('gpt-4') ? 0.06 : 0.002,
+      }));
+  }
+
+  async complete(params: any) {
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(params),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI API error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return {
+      content: data.choices[0].message.content,
+      usage: data.usage,
+    };
+  }
+}
+
+// Anthropic Client
+class AnthropicClient {
+  private apiKey: string;
+  private baseUrl = 'https://api.anthropic.com/v1';
+
+  constructor(apiKey: string) {
+    this.apiKey = apiKey;
+  }
+
+  async listModels() {
+    return [
+      {
+        id: 'claude-3-opus',
+        name: 'Claude 3 Opus',
+        maxTokens: 200000,
+        inputPricePerToken: 0.015,
+        outputPricePerToken: 0.075,
+      },
+      {
+        id: 'claude-3-sonnet',
+        name: 'Claude 3 Sonnet',
+        maxTokens: 200000,
+        inputPricePerToken: 0.003,
+        outputPricePerToken: 0.015,
+      },
+      {
+        id: 'claude-3-haiku',
+        name: 'Claude 3 Haiku',
+        maxTokens: 200000,
+        inputPricePerToken: 0.00025,
+        outputPricePerToken: 0.00125,
+      },
+    ];
+  }
+
+  async complete(params: any) {
+    const response = await fetch(`${this.baseUrl}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: params.model,
+        messages: [{ role: 'user', content: params.prompt }],
+        temperature: params.temperature,
+        max_tokens: params.maxTokens,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic API error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return {
+      content: data.content[0].text,
+      usage: {
+        prompt_tokens: data.usage.input_tokens,
+        completion_tokens: data.usage.output_tokens,
+        total_tokens: data.usage.input_tokens + data.usage.output_tokens,
+      },
+    };
+  }
+}
+
 // Initialize clients
 const openaiClient = new OpenAIClient(Deno.env.get('OPENAI_API_KEY') || '');
 const anthropicClient = new AnthropicClient(Deno.env.get('ANTHROPIC_API_KEY') || '');
@@ -25,12 +148,38 @@ const anthropicClient = new AnthropicClient(Deno.env.get('ANTHROPIC_API_KEY') ||
 serve(async (req) => {
   // Handle CORS
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { 
+      headers: {
+        ...corsHeaders,
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      } 
+    });
   }
 
   try {
     const url = new URL(req.url);
     const path = url.pathname.split('/').pop();
+
+    console.log(`Processing request for path: ${path}`);
+    
+    // Log headers for debugging
+    console.log('Request headers:', Object.fromEntries(req.headers.entries()));
+
+    // Get the JWT token from the Authorization header
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      console.error('No Authorization header found');
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized', details: 'No Authorization header found' }),
+        { 
+          status: 401, 
+          headers: { 
+            ...corsHeaders,
+            'Content-Type': 'application/json' 
+          } 
+        }
+      );
+    }
 
     // Create Supabase client
     const supabaseClient = createClient(
@@ -38,19 +187,42 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_ANON_KEY') ?? '',
       {
         global: {
-          headers: { Authorization: req.headers.get('Authorization')! },
+          headers: { Authorization: authHeader },
         },
       }
     );
 
     // Verify authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabaseClient.auth.getUser();
-
-    if (authError || !user) {
-      throw new Error('Unauthorized');
+    try {
+      const { data: { user }, error } = await supabaseClient.auth.getUser(authHeader.replace('Bearer ', ''));
+      
+      if (error || !user) {
+        console.error('Authentication error:', error);
+        return new Response(
+          JSON.stringify({ error: 'Unauthorized', details: error?.message || 'Invalid token' }),
+          { 
+            status: 401, 
+            headers: { 
+              ...corsHeaders,
+              'Content-Type': 'application/json' 
+            } 
+          }
+        );
+      }
+      
+      console.log(`Authenticated user: ${user.id}`);
+    } catch (authError) {
+      console.error('Exception during authentication:', authError);
+      return new Response(
+        JSON.stringify({ error: 'Authentication Error', details: authError.message }),
+        { 
+          status: 401, 
+          headers: { 
+            ...corsHeaders,
+            'Content-Type': 'application/json' 
+          } 
+        }
+      );
     }
 
     switch (path) {
@@ -62,6 +234,7 @@ serve(async (req) => {
         throw new Error('Not Found');
     }
   } catch (error) {
+    console.error('Error processing request:', error);
     return new Response(
       JSON.stringify({
         error: error.message,
@@ -158,108 +331,4 @@ async function handleCompletion(req: Request): Promise<Response> {
       },
     }
   );
-}
-
-// OpenAI Client
-class OpenAIClient {
-  private apiKey: string;
-  private baseUrl = 'https://api.openai.com/v1';
-
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-  }
-
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, {
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data.data
-      .filter((model: any) => 
-        model.id.startsWith('gpt-') && 
-        !model.id.includes('instruct')
-      )
-      .map((model: any) => ({
-        id: model.id,
-        maxTokens: model.id.includes('gpt-4') ? 8192 : 4096,
-        inputPricePerToken: model.id.includes('gpt-4') ? 0.03 : 0.0015,
-        outputPricePerToken: model.id.includes('gpt-4') ? 0.06 : 0.002,
-      }));
-  }
-
-  async complete(params: any) {
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(params),
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.statusText}`);
-    }
-
-    return response.json();
-  }
-}
-
-// Anthropic Client
-class AnthropicClient {
-  private apiKey: string;
-  private baseUrl = 'https://api.anthropic.com/v1';
-
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-  }
-
-  async listModels() {
-    return [
-      {
-        id: 'claude-3-sonnet',
-        name: 'Claude 3 Sonnet',
-        maxTokens: 200000,
-        inputPricePerToken: 0.0003,
-        outputPricePerToken: 0.0015,
-      },
-      {
-        id: 'claude-3-opus',
-        name: 'Claude 3 Opus',
-        maxTokens: 200000,
-        inputPricePerToken: 0.0015,
-        outputPricePerToken: 0.075,
-      },
-    ];
-  }
-
-  async complete(params: any) {
-    const response = await fetch(`${this.baseUrl}/messages`, {
-      method: 'POST',
-      headers: {
-        'anthropic-version': '2023-06-01',
-        'x-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: params.model,
-        messages: [{ role: 'user', content: params.prompt }],
-        max_tokens: params.maxTokens,
-        temperature: params.temperature,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Anthropic API error: ${response.statusText}`);
-    }
-
-    return response.json();
-  }
 }
